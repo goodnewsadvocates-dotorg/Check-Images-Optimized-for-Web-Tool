@@ -143,6 +143,21 @@
     <script>
       let lastResult = null;
 
+      window.addEventListener('error', function(event) {
+        const source = String(event && event.filename ? event.filename : '');
+        const message = String(event && event.message ? event.message : '');
+        const isExtensionMutationObserverError =
+          source.includes('web-client-content-script.js') &&
+          message.includes("Failed to execute 'observe' on 'MutationObserver'");
+
+        if (isExtensionMutationObserverError) {
+          showStatus(
+            'A browser extension script caused a console error (MutationObserver on a non-node target). This app can still run; try disabling the extension on this page if needed.',
+            false
+          );
+        }
+      });
+
       function esc(v) {
         if (v === null || v === undefined) return '';
         return String(v)
