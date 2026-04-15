@@ -1,1 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Image Inventory + PPI Checker</title>
+    <style>
+      :root {
+        --bg: #f7f6f2;
+        --surface: #ffffff;
+        --text: #28251d;
+        --muted: #6f6b63;
+        --border: #ddd7cf;
+        --accent: #01696f;
+        --empty: #d11a2a;
+      }
+      body {
+        font-family: Arial, Helvetica, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        margin: 0;
+        padding: 24px;
+      }
+      .wrap {
+        max-width: 1450px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 32px;
+      }
+      p {
+        color: var(--muted);
+        margin: 0 0 16px;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+      input[type='url'] {
+        flex: 1;
+        min-width: 400px;
+        padding: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 14px;
+      }
+      button {
+        border: none;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .primary {
+        background: var(--accent);
+        color: #fff;
+      }
+      .secondary {
+        background: #e9e6df;
+        color: #3b382f;
+      }
+      .meta {
+        margin: 8px 0 16px;
+        color: var(--muted);
+      }
+      .tablewrap {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: auto;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 1200px;
+      }
+      th,
+      td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+        text-align: left;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      th {
+        position: sticky;
+        top: 0;
+        background: #f3efe9;
+        z-index: 2;
+      }
+      tr:hover td {
+        background: #fcfbf8;
+      }
+      .empty,
+      .low,
+      .heavy {
+        color: var(--empty);
+        font-weight: 700;
+      }
+      .ok {
+        color: #0a7f30;
+        font-weight: 700;
+      }
+      .ppi {
+        font-weight: 600;
+      }
+      .note {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      a.imglink {
+        color: var(--accent);
+        text-decoration: none;
+        position: relative;
+        word-break: break-all;
+      }
+      a.imglink:hover {
+        text-decoration: underline;
+      }
+      .urlcell {
+        position: relative;
+        min-width: 340px;
+      }
+      .thumb {
+        display: none;
+        position: absolute;
+        left: 14px;
+        top: 38px;
+        width: 180px;
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px;
+        box-shadow: 0 16px 30px rgba(0, 0, 0, 0.18);
+        z-index: 5;
+      }
+      .thumb img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 6px;
+      }
+      .urlcell:hover .thumb {
+        display: block;
+      }
+      #status {
+        margin: 4px 0 12px;
+        color: var(--muted);
+      }
+      .hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Deduplicated image inventory with actual PPI</h1>
+      <p>
+        Enter a webpage URL, then scrape images. PPI values under
+        <span class="low">72</span> are shown in red. Missing metadata appears as
+        <span class="empty">EMPTY</span>.
+      </p>
 
+      <div class="controls">
+        <input id="pageUrl" type="url" placeholder="https://example.com" />
+        <button class="primary" onclick="runScrape()">Scrape page</button>
+        <button class="secondary" onclick="exportSheet()">Send to Sheet</button>
+      </div>
+
+      <div id="status">Ready.</div>
+      <div id="meta" class="meta hidden"></div>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th>
+              <th>Image URL</th>
+              <th>Width</th>
+              <th>Height</th>
+              <th>File size</th>
+              <th>Resolution</th>
+              <th>Optimization</th>
+              <th>Alt text</th>
+              <th>Title</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      let latestPayload = null;
+
+      function escapeHtml(v) {
+        return String(v ?? '')
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#39;');
+      }
+
+      function disp(v) {
+        if (v === null || v === undefined || String(v).trim() === '') {
+          return '<span class="empty">EMPTY</span>';
+        }
+        return escapeHtml(v);
+      }
+
+      function runScrape() {
+        const url = document.getElementById('pageUrl').value.trim();
+        if (!url) {
+          setStatus('Please enter a URL first.');
+          return;
+        }
+
+        setStatus('Scraping page and checking images...');
+
+        google.script.run
+          .withSuccessHandler((payload) => {
+            latestPayload = payload;
+            renderRows(payload.rows || []);
+
+            const meta = document.getElementById('meta');
+            meta.classList.remove('hidden');
+            meta.innerHTML = `Scanned <strong>${escapeHtml(
+              payload.sourceUrl
+            )}</strong>. Found ${payload.totalImages} images (${payload.uniqueImages} unique).`;
+
+            setStatus('Done.');
+          })
+          .withFailureHandler((err) => {
+            setStatus('Error: ' + (err && err.message ? err.message : err));
+          })
+          .scrapePageImages(url);
+      }
+
+      function exportSheet() {
+        if (!latestPayload) {
+          setStatus('Run a scrape first, then export to sheet.');
+          return;
+        }
+
+        setStatus('Writing results to sheet...');
+        google.script.run
+          .withSuccessHandler((res) => {
+            setStatus(`Wrote ${res.rowsWritten} rows to sheet "${res.sheetName}".`);
+          })
+          .withFailureHandler((err) => {
+            setStatus('Sheet export failed: ' + (err && err.message ? err.message : err));
+          })
+          .writeResultsToSheet(latestPayload);
+      }
+
+      function renderRows(rows) {
+        const tbody = document.getElementById('rows');
+
+        tbody.innerHTML = rows
+          .map((r) => {
+            let ppiHtml;
+            if (!r.ppiDisplay) {
+              ppiHtml = '<span class="empty">EMPTY</span>';
+            } else {
+              const low = Number(r.ppi) < 72;
+              ppiHtml = `<span class="ppi ${low ? 'low' : ''}">${escapeHtml(r.ppiDisplay)}</span>`;
+            }
+
+            const noteHtml = r.ppiNote
+              ? `<div class="note">${escapeHtml(r.ppiNote)}</div>`
+              : '';
+
+            const fileSize = r.kb ? `${r.kb.toFixed(2)} KB` : '';
+            const optClass =
+              r.optimized === 'Good' || r.optimized === 'Likely OK'
+                ? 'ok'
+                : r.optimized === 'Needs optimization'
+                ? 'heavy'
+                : '';
+
+            const safeUrl = escapeHtml(r.url);
+
+            return `
+            <tr>
+              <td>${disp(r.filename)}</td>
+              <td class="urlcell">
+                <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="imglink">${safeUrl}</a>
+                <div class="thumb"><img src="${safeUrl}" alt="Thumbnail for ${escapeHtml(r.filename)}" loading="lazy"></div>
+              </td>
+              <td>${disp(r.width)}</td>
+              <td>${disp(r.height)}</td>
+              <td>${disp(fileSize)}</td>
+              <td>${ppiHtml}${noteHtml}</td>
+              <td><span class="${optClass}">${disp(r.optimized)}</span></td>
+              <td>${disp(r.alt)}</td>
+              <td>${disp(r.title)}</td>
+            </tr>
+          `;
+          })
+          .join('');
+      }
+
+      function setStatus(message) {
+        document.getElementById('status').textContent = message;
+      }
+    </script>
+  </body>
+</html>
