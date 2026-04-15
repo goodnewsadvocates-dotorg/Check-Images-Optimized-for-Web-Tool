@@ -327,7 +327,7 @@ function inspectImage_(imageUrl) {
     }
 
     var blob = response.getBlob();
-    var bytes = blob.getBytes();
+    var bytes = normalizeByteArray_(blob.getBytes());
     result.byteSize = bytes.length;
 
     var dimensions = getImageDimensions_(blob, bytes);
@@ -347,7 +347,7 @@ function inspectImage_(imageUrl) {
 }
 
 function getImageDimensions_(blob, bytes) {
-  var raw = bytes || blob.getBytes();
+  var raw = bytes || normalizeByteArray_(blob.getBytes());
   var mime = (blob.getContentType() || '').toLowerCase();
 
   if (mime.indexOf('jpeg') !== -1 || mime.indexOf('jpg') !== -1 || looksLikeJpeg_(raw)) {
@@ -367,7 +367,7 @@ function getImageDimensions_(blob, bytes) {
 }
 
 function extractPpiFromBlob_(blob, bytes) {
-  var raw = bytes || blob.getBytes();
+  var raw = bytes || normalizeByteArray_(blob.getBytes());
   var mime = blob.getContentType() || '';
 
   if (mime.indexOf('jpeg') !== -1 || mime.indexOf('jpg') !== -1 || looksLikeJpeg_(raw)) {
@@ -581,11 +581,29 @@ function extractPngPpi_(bytes) {
 }
 
 function readUInt32BE_(bytes, idx) {
-  return ((bytes[idx] << 24) >>> 0) + ((bytes[idx + 1] << 16) >>> 0) + ((bytes[idx + 2] << 8) >>> 0) + (bytes[idx + 3] >>> 0);
+  return ((toUint8_(bytes[idx]) << 24) >>> 0)
+    + ((toUint8_(bytes[idx + 1]) << 16) >>> 0)
+    + ((toUint8_(bytes[idx + 2]) << 8) >>> 0)
+    + (toUint8_(bytes[idx + 3]) >>> 0);
 }
 
 function readUInt32LE_(bytes, idx) {
-  return (bytes[idx] >>> 0) + ((bytes[idx + 1] << 8) >>> 0) + ((bytes[idx + 2] << 16) >>> 0) + ((bytes[idx + 3] << 24) >>> 0);
+  return (toUint8_(bytes[idx]) >>> 0)
+    + ((toUint8_(bytes[idx + 1]) << 8) >>> 0)
+    + ((toUint8_(bytes[idx + 2]) << 16) >>> 0)
+    + ((toUint8_(bytes[idx + 3]) << 24) >>> 0);
+}
+
+function normalizeByteArray_(bytes) {
+  var out = new Array(bytes.length);
+  for (var i = 0; i < bytes.length; i++) {
+    out[i] = toUint8_(bytes[i]);
+  }
+  return out;
+}
+
+function toUint8_(value) {
+  return value & 0xFF;
 }
 
 function round2_(num) {
