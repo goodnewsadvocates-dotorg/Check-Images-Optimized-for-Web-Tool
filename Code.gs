@@ -327,13 +327,14 @@ function inspectImage_(imageUrl) {
     }
 
     var blob = response.getBlob();
-    result.byteSize = blob.getBytes().length;
+    var bytes = blob.getBytes();
+    result.byteSize = bytes.length;
 
-    var dimensions = getImageDimensions_(blob);
+    var dimensions = getImageDimensions_(blob, bytes);
     result.width = dimensions.width;
     result.height = dimensions.height;
 
-    var ppiInfo = extractPpiFromBlob_(blob);
+    var ppiInfo = extractPpiFromBlob_(blob, bytes);
     result.xPpi = ppiInfo.x;
     result.yPpi = ppiInfo.y;
     result.ppi = ppiInfo.ppi;
@@ -345,27 +346,35 @@ function inspectImage_(imageUrl) {
   return result;
 }
 
-function getImageDimensions_(blob) {
-  try {
-    var img = ImagesService.openImage(blob);
-    return {
-      width: img.getWidth(),
-      height: img.getHeight()
-    };
-  } catch (err) {
-    return { width: null, height: null };
+function getImageDimensions_(blob, bytes) {
+  var raw = bytes || blob.getBytes();
+  var mime = (blob.getContentType() || '').toLowerCase();
+
+  if (mime.indexOf('jpeg') !== -1 || mime.indexOf('jpg') !== -1 || looksLikeJpeg_(raw)) {
+    return extractJpegDimensions_(raw);
   }
+  if (mime.indexOf('png') !== -1 || looksLikePng_(raw)) {
+    return extractPngDimensions_(raw);
+  }
+  if (mime.indexOf('gif') !== -1 || looksLikeGif_(raw)) {
+    return extractGifDimensions_(raw);
+  }
+  if (mime.indexOf('webp') !== -1 || looksLikeWebp_(raw)) {
+    return extractWebpDimensions_(raw);
+  }
+
+  return { width: null, height: null };
 }
 
-function extractPpiFromBlob_(blob) {
-  var bytes = blob.getBytes();
+function extractPpiFromBlob_(blob, bytes) {
+  var raw = bytes || blob.getBytes();
   var mime = blob.getContentType() || '';
 
-  if (mime.indexOf('jpeg') !== -1 || mime.indexOf('jpg') !== -1 || looksLikeJpeg_(bytes)) {
-    return extractJpegPpi_(bytes);
+  if (mime.indexOf('jpeg') !== -1 || mime.indexOf('jpg') !== -1 || looksLikeJpeg_(raw)) {
+    return extractJpegPpi_(raw);
   }
-  if (mime.indexOf('png') !== -1 || looksLikePng_(bytes)) {
-    return extractPngPpi_(bytes);
+  if (mime.indexOf('png') !== -1 || looksLikePng_(raw)) {
+    return extractPngPpi_(raw);
   }
 
   return { x: null, y: null, ppi: null, note: 'No embedded DPI metadata found' };
@@ -382,6 +391,106 @@ function looksLikePng_(bytes) {
     if (bytes[i] !== sig[i]) return false;
   }
   return true;
+}
+
+function extractJpegDimensions_(bytes) {
+  var i = 2; // skip SOI
+  while (i + 8 < bytes.length) {
+    if (bytes[i] !== 0xFF) {
+      i++;
+      continue;
+    }
+
+    var marker = bytes[i + 1];
+    if (marker === 0xD9 || marker === 0xDA) break;
+
+    var len = (bytes[i + 2] << 8) + bytes[i + 3];
+    if (len < 2 || i + 2 + len > bytes.length) break;
+
+    var isSof = (marker >= 0xC0 && marker <= 0xC3)
+      || (marker >= 0xC5 && marker <= 0xC7)
+      || (marker >= 0xC9 && marker <= 0xCB)
+      || (marker >= 0xCD && marker <= 0xCF);
+
+    if (isSof && i + 8 < bytes.length) {
+      return {
+        height: (bytes[i + 5] << 8) + bytes[i + 6],
+        width: (bytes[i + 7] << 8) + bytes[i + 8]
+      };
+    }
+
+    i += 2 + len;
+  }
+
+  return { width: null, height: null };
+}
+
+function extractPngDimensions_(bytes) {
+  if (bytes.length < 24) return { width: null, height: null };
+  return {
+    width: readUInt32BE_(bytes, 16),
+    height: readUInt32BE_(bytes, 20)
+  };
+}
+
+function looksLikeGif_(bytes) {
+  if (!bytes || bytes.length < 6) return false;
+  var h = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+  return h === 'GIF87a' || h === 'GIF89a';
+}
+
+function extractGifDimensions_(bytes) {
+  if (!looksLikeGif_(bytes) || bytes.length < 10) {
+    return { width: null, height: null };
+  }
+  return {
+    width: bytes[6] + (bytes[7] << 8),
+    height: bytes[8] + (bytes[9] << 8)
+  };
+}
+
+function looksLikeWebp_(bytes) {
+  if (!bytes || bytes.length < 12) return false;
+  return String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === 'RIFF'
+    && String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]) === 'WEBP';
+}
+
+function extractWebpDimensions_(bytes) {
+  if (!looksLikeWebp_(bytes)) return { width: null, height: null };
+
+  var i = 12;
+  while (i + 8 <= bytes.length) {
+    var chunkType = String.fromCharCode(bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]);
+    var chunkSize = readUInt32LE_(bytes, i + 4);
+    var dataStart = i + 8;
+
+    if (chunkType === 'VP8 ' && dataStart + 10 <= bytes.length) {
+      return {
+        width: ((bytes[dataStart + 7] << 8) | bytes[dataStart + 6]) & 0x3FFF,
+        height: ((bytes[dataStart + 9] << 8) | bytes[dataStart + 8]) & 0x3FFF
+      };
+    }
+
+    if (chunkType === 'VP8L' && dataStart + 5 <= bytes.length) {
+      var b0 = bytes[dataStart + 1];
+      var b1 = bytes[dataStart + 2];
+      var b2 = bytes[dataStart + 3];
+      var b3 = bytes[dataStart + 4];
+      var width = 1 + (b0 | ((b1 & 0x3F) << 8));
+      var height = 1 + (((b1 >> 6) | (b2 << 2) | ((b3 & 0x0F) << 10)) >>> 0);
+      return { width: width, height: height };
+    }
+
+    if (chunkType === 'VP8X' && dataStart + 10 <= bytes.length) {
+      var widthMinusOne = bytes[dataStart + 4] | (bytes[dataStart + 5] << 8) | (bytes[dataStart + 6] << 16);
+      var heightMinusOne = bytes[dataStart + 7] | (bytes[dataStart + 8] << 8) | (bytes[dataStart + 9] << 16);
+      return { width: widthMinusOne + 1, height: heightMinusOne + 1 };
+    }
+
+    i = dataStart + chunkSize + (chunkSize % 2);
+  }
+
+  return { width: null, height: null };
 }
 
 function extractJpegPpi_(bytes) {
@@ -473,6 +582,10 @@ function extractPngPpi_(bytes) {
 
 function readUInt32BE_(bytes, idx) {
   return ((bytes[idx] << 24) >>> 0) + ((bytes[idx + 1] << 16) >>> 0) + ((bytes[idx + 2] << 8) >>> 0) + (bytes[idx + 3] >>> 0);
+}
+
+function readUInt32LE_(bytes, idx) {
+  return (bytes[idx] >>> 0) + ((bytes[idx + 1] << 8) >>> 0) + ((bytes[idx + 2] << 16) >>> 0) + ((bytes[idx + 3] << 24) >>> 0);
 }
 
 function round2_(num) {
