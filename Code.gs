@@ -1,93 +1,387 @@
+/**
+ * Google Apps Script web app for scraping image data from any webpage.
+ *
+ * Features:
+ * - Scrapes image URLs, alt, and title from a page
+ * - Resolves relative image URLs
+ * - Fetches each image to detect dimensions, byte size, and embedded PPI when available
+ * - Supports JPEG JFIF density parsing and PNG pHYs parsing
+ * - Returns deduplicated image data ready for table display and CSV export
+ */
+
 function doGet() {
-  const t = HtmlService.createTemplateFromFile('index');
-  return t.evaluate()
-    .setTitle('Schema Scraper Tool');
+  return HtmlService.createHtmlOutputFromFile('index')
+    .setTitle('Image Optimization Checker')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function pushSchemaDatatoSheet(sheetUrl, schemaData) {
-  if (!sheetUrl) {
-    throw new Error('Google Sheet URL is required.');
-  }
-  if (!schemaData || typeof schemaData !== 'object') {
-    throw new Error('Schema data payload is required.');
+function analyzePage(pageUrl) {
+  if (!pageUrl || !String(pageUrl).trim()) {
+    throw new Error('Please provide a page URL.');
   }
 
-  const spreadsheet = SpreadsheetApp.openByUrl(sheetUrl);
-  const sheet = spreadsheet.getSheetByName('Blog/Article');
-  if (!sheet) {
-    throw new Error('Tab "Blog/Article" was not found in the provided Google Sheet.');
+  var normalizedPageUrl = normalizeUrl_(String(pageUrl).trim());
+  var pageResponse;
+  try {
+    pageResponse = UrlFetchApp.fetch(normalizedPageUrl, {
+      followRedirects: true,
+      muteHttpExceptions: true,
+      validateHttpsCertificates: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ImageOptimizationChecker/1.0)'
+      }
+    });
+  } catch (err) {
+    throw new Error('Unable to fetch page: ' + err.message);
   }
 
-  const blogPosting = schemaData.blogPosting || {};
-  const webPage = schemaData.webPage || {};
-  const breadcrumbList = schemaData.breadcrumbList || {};
-  const listItem = schemaData.listItem || {};
-  const thing = schemaData.thing || {};
-  const imageObjects = Array.isArray(schemaData.imageObjects) ? schemaData.imageObjects : [];
-
-  const writeCell = (a1, value) => sheet.getRange(a1).setValue(value || '');
-
-  // Blog Posting
-  writeCell('B4', blogPosting.toolUri);
-  writeCell('B5', blogPosting.url);
-  writeCell('B6', blogPosting.name);
-  writeCell('B7', blogPosting.author);
-  writeCell('B8', blogPosting.dateModified);
-  writeCell('B9', blogPosting.datePublished);
-  writeCell('B10', blogPosting.description);
-  writeCell('B11', blogPosting.headline);
-  writeCell('B13', blogPosting.about);
-  writeCell('B14', blogPosting.alternateName);
-  writeCell('B15', blogPosting.articleSection);
-  writeCell('B17', blogPosting.commentCount);
-  writeCell('B18', blogPosting.creator);
-  writeCell('B19', blogPosting.expires);
-  writeCell('B20', blogPosting.inLanguage);
-  writeCell('B21', blogPosting.isAccessibleForFree);
-  writeCell('B22', blogPosting.isFamilyFriendly);
-  writeCell('B24', blogPosting.keywords);
-  writeCell('B25', blogPosting.publisher);
-  writeCell('B26', blogPosting.timeRequired);
-  writeCell('B29', blogPosting.wordCount);
-
-  // Web Page
-  writeCell('D4', webPage.toolUri);
-  writeCell('D5', webPage.url);
-  writeCell('D6', webPage.name);
-  writeCell('D8', webPage.dateModified);
-  writeCell('D9', webPage.datePublished);
-  writeCell('D10', webPage.expires);
-  writeCell('D12', webPage.inLanguage);
-  writeCell('D13', webPage.isAccessibleForFree);
-  writeCell('D14', webPage.isFamilyFriendly);
-  writeCell('D16', webPage.mainEntityOfPage);
-  writeCell('D17', webPage.publisher);
-
-  // BreadcrumbList
-  const positions = Array.isArray(breadcrumbList.positions) ? breadcrumbList.positions : [];
-  for (let i = 0; i < 5; i += 1) {
-    writeCell(`F${4 + i}`, positions[i] || '');
-  }
-  writeCell('F9', breadcrumbList.toolUri);
-  writeCell('F11', breadcrumbList.itemListOrder);
-  writeCell('F12', breadcrumbList.name);
-  writeCell('F13', breadcrumbList.numberOfItems);
-  writeCell('F15', breadcrumbList.url);
-
-  // ListItem + Thing
-  writeCell('F18', listItem.toolUri);
-  writeCell('F19', listItem.name);
-  writeCell('F21', listItem.position);
-  writeCell('F22', listItem.previousItem);
-  writeCell('F24', listItem.url);
-  writeCell('F27', thing.name);
-  writeCell('F28', thing.toolUri);
-
-  // ImageObject rows (I:N, starting at row 4)
-  sheet.getRange(4, 9, 200, 6).clearContent();
-  if (imageObjects.length > 0) {
-    sheet.getRange(4, 9, imageObjects.length, 6).setValues(imageObjects);
+  var code = pageResponse.getResponseCode();
+  if (code < 200 || code >= 300) {
+    throw new Error('Page request failed with HTTP ' + code + '.');
   }
 
-  return 'Schema data was written to Blog/Article tab.';
+  var html = pageResponse.getContentText();
+  var scrapedImages = extractImgTags_(html, normalizedPageUrl);
+
+  if (!scrapedImages.length) {
+    return {
+      pageUrl: normalizedPageUrl,
+      scannedAt: new Date().toISOString(),
+      totalImages: 0,
+      rows: []
+    };
+  }
+
+  var deduped = dedupeByUrl_(scrapedImages);
+  var rows = [];
+
+  for (var i = 0; i < deduped.length; i++) {
+    var img = deduped[i];
+    var metadata = inspectImage_(img.url);
+
+    var ppiDisplay = metadata.ppi !== null ? metadata.ppi.toFixed(2) + ' PPI' : '';
+    var optimizedForWeb = metadata.byteSize !== null ? metadata.byteSize <= 300 * 1024 : null;
+
+    rows.push({
+      filename: filenameFromUrl_(img.url),
+      url: img.url,
+      width: metadata.width,
+      height: metadata.height,
+      ppi: metadata.ppi,
+      x_ppi: metadata.xPpi,
+      y_ppi: metadata.yPpi,
+      ppi_note: metadata.ppiNote,
+      ppi_display: ppiDisplay,
+      alt: img.alt,
+      title: img.title,
+      size_bytes: metadata.byteSize,
+      size_kb: metadata.byteSize !== null ? +(metadata.byteSize / 1024).toFixed(2) : null,
+      optimized_for_web: optimizedForWeb,
+      optimization_note: optimizedForWeb === null
+        ? 'Could not read image bytes'
+        : optimizedForWeb
+          ? 'Likely web-friendly size (<= 300 KB)'
+          : 'Large image for web (> 300 KB)'
+    });
+  }
+
+  return {
+    pageUrl: normalizedPageUrl,
+    scannedAt: new Date().toISOString(),
+    totalImages: rows.length,
+    rows: rows
+  };
+}
+
+function normalizeUrl_(value) {
+  if (/^https?:\/\//i.test(value)) return value;
+  return 'https://' + value;
+}
+
+function extractImgTags_(html, baseUrl) {
+  var out = [];
+  var imgTagRegex = /<img\b[^>]*>/gi;
+  var tags = html.match(imgTagRegex) || [];
+
+  for (var i = 0; i < tags.length; i++) {
+    var tag = tags[i];
+    var src = getAttribute_(tag, 'src');
+    if (!src) continue;
+
+    var resolved = resolveUrl_(baseUrl, src.trim());
+    if (!resolved) continue;
+
+    out.push({
+      url: resolved,
+      alt: decodeHtmlEntities_(getAttribute_(tag, 'alt') || ''),
+      title: decodeHtmlEntities_(getAttribute_(tag, 'title') || '')
+    });
+  }
+
+  return out;
+}
+
+function getAttribute_(tag, attributeName) {
+  var escapedName = attributeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  var patterns = [
+    new RegExp('\\b' + escapedName + '\\s*=\\s*"([^"]*)"', 'i'),
+    new RegExp("\\b" + escapedName + "\\s*=\\s*'([^']*)'", 'i'),
+    new RegExp('\\b' + escapedName + '\\s*=\\s*([^\\s>]+)', 'i')
+  ];
+
+  for (var i = 0; i < patterns.length; i++) {
+    var match = tag.match(patterns[i]);
+    if (match && match[1] !== undefined) return match[1];
+  }
+  return '';
+}
+
+function resolveUrl_(baseUrl, maybeRelative) {
+  if (!maybeRelative) return '';
+  if (/^data:/i.test(maybeRelative)) return '';
+  if (/^https?:\/\//i.test(maybeRelative)) return maybeRelative;
+  if (/^\/\//.test(maybeRelative)) {
+    return 'https:' + maybeRelative;
+  }
+
+  var parts = baseUrl.match(/^(https?:\/\/[^\/]+)(\/.*)?$/i);
+  if (!parts) return '';
+  var origin = parts[1];
+  var basePath = parts[2] || '/';
+
+  if (maybeRelative.charAt(0) === '/') {
+    return origin + maybeRelative;
+  }
+
+  var dir = basePath.replace(/[^\/]*$/, '');
+  var combined = dir + maybeRelative;
+  return origin + normalizePath_(combined);
+}
+
+function normalizePath_(path) {
+  var segments = path.split('/');
+  var stack = [];
+
+  for (var i = 0; i < segments.length; i++) {
+    var seg = segments[i];
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      if (stack.length) stack.pop();
+      continue;
+    }
+    stack.push(seg);
+  }
+
+  return '/' + stack.join('/');
+}
+
+function dedupeByUrl_(images) {
+  var seen = {};
+  var out = [];
+  for (var i = 0; i < images.length; i++) {
+    var key = images[i].url;
+    if (seen[key]) continue;
+    seen[key] = true;
+    out.push(images[i]);
+  }
+  return out;
+}
+
+function inspectImage_(imageUrl) {
+  var result = {
+    width: null,
+    height: null,
+    byteSize: null,
+    ppi: null,
+    xPpi: null,
+    yPpi: null,
+    ppiNote: ''
+  };
+
+  try {
+    var response = UrlFetchApp.fetch(imageUrl, {
+      followRedirects: true,
+      muteHttpExceptions: true,
+      validateHttpsCertificates: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; ImageOptimizationChecker/1.0)'
+      }
+    });
+
+    if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+      result.ppiNote = 'Image request failed with HTTP ' + response.getResponseCode();
+      return result;
+    }
+
+    var blob = response.getBlob();
+    result.byteSize = blob.getBytes().length;
+
+    var dimensions = getImageDimensions_(blob);
+    result.width = dimensions.width;
+    result.height = dimensions.height;
+
+    var ppiInfo = extractPpiFromBlob_(blob);
+    result.xPpi = ppiInfo.x;
+    result.yPpi = ppiInfo.y;
+    result.ppi = ppiInfo.ppi;
+    result.ppiNote = ppiInfo.note;
+  } catch (err) {
+    result.ppiNote = 'Could not read metadata: ' + err.message;
+  }
+
+  return result;
+}
+
+function getImageDimensions_(blob) {
+  try {
+    var img = ImagesService.openImage(blob);
+    return {
+      width: img.getWidth(),
+      height: img.getHeight()
+    };
+  } catch (err) {
+    return { width: null, height: null };
+  }
+}
+
+function extractPpiFromBlob_(blob) {
+  var bytes = blob.getBytes();
+  var mime = blob.getContentType() || '';
+
+  if (mime.indexOf('jpeg') !== -1 || mime.indexOf('jpg') !== -1 || looksLikeJpeg_(bytes)) {
+    return extractJpegPpi_(bytes);
+  }
+  if (mime.indexOf('png') !== -1 || looksLikePng_(bytes)) {
+    return extractPngPpi_(bytes);
+  }
+
+  return { x: null, y: null, ppi: null, note: 'No embedded DPI metadata found' };
+}
+
+function looksLikeJpeg_(bytes) {
+  return bytes && bytes.length > 2 && bytes[0] === 0xFF && bytes[1] === 0xD8;
+}
+
+function looksLikePng_(bytes) {
+  var sig = [0x89, 0x50, 0x4E, 0x47];
+  if (!bytes || bytes.length < 4) return false;
+  for (var i = 0; i < sig.length; i++) {
+    if (bytes[i] !== sig[i]) return false;
+  }
+  return true;
+}
+
+function extractJpegPpi_(bytes) {
+  // Look for APP0 (JFIF) segment: density info at fixed positions.
+  var i = 2; // skip SOI
+  while (i + 9 < bytes.length) {
+    if (bytes[i] !== 0xFF) {
+      i++;
+      continue;
+    }
+
+    var marker = bytes[i + 1];
+    if (marker === 0xD9 || marker === 0xDA) break; // EOI or SOS
+
+    var length = (bytes[i + 2] << 8) + bytes[i + 3];
+    if (!length || i + 2 + length > bytes.length) break;
+
+    if (marker === 0xE0) {
+      var idStart = i + 4;
+      if (bytes[idStart] === 0x4A && bytes[idStart + 1] === 0x46 && bytes[idStart + 2] === 0x49 && bytes[idStart + 3] === 0x46) {
+        var units = bytes[idStart + 7];
+        var xDensity = (bytes[idStart + 8] << 8) + bytes[idStart + 9];
+        var yDensity = (bytes[idStart + 10] << 8) + bytes[idStart + 11];
+
+        if (!xDensity || !yDensity) {
+          return { x: null, y: null, ppi: null, note: 'No embedded DPI metadata found' };
+        }
+
+        var xPpi = null;
+        var yPpi = null;
+
+        if (units === 1) {
+          xPpi = xDensity;
+          yPpi = yDensity;
+        } else if (units === 2) {
+          xPpi = xDensity * 2.54;
+          yPpi = yDensity * 2.54;
+        } else {
+          return { x: null, y: null, ppi: null, note: 'Density units unspecified in metadata' };
+        }
+
+        var avg = round2_((xPpi + yPpi) / 2);
+        return {
+          x: round2_(xPpi),
+          y: round2_(yPpi),
+          ppi: avg,
+          note: ''
+        };
+      }
+    }
+
+    i += 2 + length;
+  }
+
+  return { x: null, y: null, ppi: null, note: 'No embedded DPI metadata found' };
+}
+
+function extractPngPpi_(bytes) {
+  // PNG chunks start at byte 8. Look for pHYs chunk.
+  var i = 8;
+  while (i + 12 <= bytes.length) {
+    var len = readUInt32BE_(bytes, i);
+    var type = String.fromCharCode(bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]);
+    var dataStart = i + 8;
+
+    if (type === 'pHYs' && len >= 9 && dataStart + 9 <= bytes.length) {
+      var xPpm = readUInt32BE_(bytes, dataStart);
+      var yPpm = readUInt32BE_(bytes, dataStart + 4);
+      var unit = bytes[dataStart + 8];
+
+      if (unit === 1 && xPpm > 0 && yPpm > 0) {
+        var xPpi = xPpm * 0.0254;
+        var yPpi = yPpm * 0.0254;
+        return {
+          x: round2_(xPpi),
+          y: round2_(yPpi),
+          ppi: round2_((xPpi + yPpi) / 2),
+          note: ''
+        };
+      }
+      return { x: null, y: null, ppi: null, note: 'No embedded DPI metadata found' };
+    }
+
+    i += 12 + len;
+  }
+
+  return { x: null, y: null, ppi: null, note: 'No embedded DPI metadata found' };
+}
+
+function readUInt32BE_(bytes, idx) {
+  return ((bytes[idx] << 24) >>> 0) + ((bytes[idx + 1] << 16) >>> 0) + ((bytes[idx + 2] << 8) >>> 0) + (bytes[idx + 3] >>> 0);
+}
+
+function round2_(num) {
+  return Math.round(num * 100) / 100;
+}
+
+function filenameFromUrl_(url) {
+  try {
+    var clean = url.split('#')[0].split('?')[0];
+    var bits = clean.split('/');
+    return decodeURIComponent(bits[bits.length - 1] || '(no filename)');
+  } catch (err) {
+    return '(unknown)';
+  }
+}
+
+function decodeHtmlEntities_(s) {
+  if (!s) return '';
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }
