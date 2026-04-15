@@ -1,1 +1,278 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Image Optimization Checker</title>
+    <style>
+      :root {
+        --bg: #f7f6f2;
+        --surface: #ffffff;
+        --text: #28251d;
+        --muted: #6f6b63;
+        --border: #ddd7cf;
+        --accent: #01696f;
+        --empty: #d11a2a;
+        --ok: #2f7b2f;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 32px;
+        font-family: Arial, Helvetica, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .wrap { max-width: 1500px; margin: 0 auto; }
+      h1 { margin: 0 0 8px; font-size: 32px; }
+      p { margin: 0 0 16px; color: var(--muted); }
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+      input[type='url'] {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 14px;
+      }
+      button {
+        border: 0;
+        border-radius: 10px;
+        background: var(--accent);
+        color: white;
+        padding: 12px 18px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .secondary { background: #4c6f89; }
+      .toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+      .meta { font-size: 13px; color: var(--muted); margin: 6px 0 14px; }
+      .status {
+        background: #f3efe9;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        display: none;
+      }
+      .status.error { color: var(--empty); }
+      .tablewrap {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: auto;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+      }
+      table { width: 100%; border-collapse: collapse; min-width: 1400px; }
+      th, td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+        text-align: left;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      th { position: sticky; top: 0; background: #f3efe9; z-index: 2; }
+      tr:hover td { background: #fcfbf8; }
+      .empty, .low, .bad { color: var(--empty); font-weight: 700; }
+      .ok { color: var(--ok); font-weight: 700; }
+      .ppi { font-weight: 600; }
+      .note { margin-top: 4px; color: var(--muted); font-size: 12px; }
+      a.imglink { color: var(--accent); text-decoration: none; word-break: break-all; }
+      a.imglink:hover { text-decoration: underline; }
+      .urlcell { position: relative; min-width: 360px; }
+      .thumb {
+        display: none;
+        position: absolute;
+        left: 14px;
+        top: 38px;
+        width: 180px;
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 8px;
+        box-shadow: 0 16px 30px rgba(0,0,0,.18);
+        z-index: 5;
+      }
+      .thumb img { display: block; width: 100%; height: auto; border-radius: 6px; }
+      .urlcell:hover .thumb { display: block; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Image Optimization Checker</h1>
+      <p>Paste a page URL to scrape image details (URL, dimensions, metadata PPI, file size, alt/title) and flag images that may be too large for web delivery.</p>
 
+      <div class="controls">
+        <input id="url" type="url" placeholder="https://example.com/page" />
+        <button id="runBtn" onclick="runAudit()">Scrape Page</button>
+      </div>
+
+      <div class="toolbar">
+        <button class="secondary" id="csvBtn" onclick="downloadCsv()" disabled>Download CSV</button>
+      </div>
+
+      <div id="status" class="status"></div>
+      <div id="meta" class="meta"></div>
+
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th>
+              <th>Image URL</th>
+              <th>Width</th>
+              <th>Height</th>
+              <th>Resolution (PPI)</th>
+              <th>File size</th>
+              <th>Optimized?</th>
+              <th>Alt text</th>
+              <th>Title</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      let lastResult = null;
+
+      function esc(v) {
+        if (v === null || v === undefined) return '';
+        return String(v)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#39;');
+      }
+
+      function disp(v) {
+        if (v === null || v === undefined || String(v).trim() === '') {
+          return '<span class="empty">EMPTY</span>';
+        }
+        return esc(v);
+      }
+
+      function showStatus(msg, isError) {
+        const el = document.getElementById('status');
+        el.style.display = msg ? 'block' : 'none';
+        el.className = isError ? 'status error' : 'status';
+        el.textContent = msg || '';
+      }
+
+      function runAudit() {
+        const url = document.getElementById('url').value.trim();
+        if (!url) {
+          showStatus('Please provide a page URL.', true);
+          return;
+        }
+
+        document.getElementById('runBtn').disabled = true;
+        document.getElementById('csvBtn').disabled = true;
+        showStatus('Scraping page and analyzing image metadata…', false);
+        document.getElementById('rows').innerHTML = '';
+        document.getElementById('meta').textContent = '';
+
+        google.script.run
+          .withSuccessHandler(renderResult)
+          .withFailureHandler(function(err) {
+            document.getElementById('runBtn').disabled = false;
+            showStatus('Error: ' + (err && err.message ? err.message : err), true);
+          })
+          .analyzePage(url);
+      }
+
+      function renderResult(result) {
+        lastResult = result;
+        document.getElementById('runBtn').disabled = false;
+        document.getElementById('csvBtn').disabled = !(result && result.rows && result.rows.length);
+
+        const rowsEl = document.getElementById('rows');
+        const rows = (result && result.rows) || [];
+
+        if (!rows.length) {
+          rowsEl.innerHTML = '<tr><td colspan="9"><span class="empty">No images found on this page.</span></td></tr>';
+          document.getElementById('meta').textContent = `Scanned: ${result.pageUrl} • ${new Date(result.scannedAt).toLocaleString()} • 0 images`;
+          showStatus('Scan complete. No images detected.', false);
+          return;
+        }
+
+        const html = rows.map(r => {
+          const safeUrl = esc(r.url);
+          const ppiHtml = r.ppi_display
+            ? `<span class="${r.ppi < 72 ? 'ppi low' : 'ppi'}">${esc(r.ppi_display)}</span>`
+            : '<span class="empty">EMPTY</span>';
+          const ppiNote = r.ppi_note ? `<div class="note">${esc(r.ppi_note)}</div>` : '';
+
+          const sizeLabel = r.size_kb !== null && r.size_kb !== undefined
+            ? `${Number(r.size_kb).toFixed(2)} KB`
+            : '<span class="empty">EMPTY</span>';
+
+          const optimizedLabel = r.optimized_for_web === null
+            ? '<span class="empty">UNKNOWN</span>'
+            : r.optimized_for_web
+              ? '<span class="ok">YES</span>'
+              : '<span class="bad">NO</span>';
+
+          return `
+            <tr>
+              <td>${disp(r.filename)}</td>
+              <td class="urlcell">
+                <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="imglink">${safeUrl}</a>
+                <div class="thumb"><img src="${safeUrl}" alt="Thumbnail for ${esc(r.filename || 'image')}" loading="lazy"></div>
+              </td>
+              <td>${disp(r.width)}</td>
+              <td>${disp(r.height)}</td>
+              <td>${ppiHtml}${ppiNote}</td>
+              <td>${sizeLabel}</td>
+              <td>${optimizedLabel}<div class="note">${esc(r.optimization_note || '')}</div></td>
+              <td>${disp(r.alt)}</td>
+              <td>${disp(r.title)}</td>
+            </tr>
+          `;
+        }).join('');
+
+        rowsEl.innerHTML = html;
+        document.getElementById('meta').textContent = `Scanned: ${result.pageUrl} • ${new Date(result.scannedAt).toLocaleString()} • ${rows.length} deduplicated images`;
+        showStatus('Scan complete.', false);
+      }
+
+      function downloadCsv() {
+        if (!lastResult || !lastResult.rows || !lastResult.rows.length) return;
+
+        const headers = [
+          'filename', 'url', 'width', 'height', 'ppi', 'x_ppi', 'y_ppi', 'ppi_note',
+          'ppi_display', 'size_bytes', 'size_kb', 'optimized_for_web', 'optimization_note', 'alt', 'title'
+        ];
+
+        const escCsv = (v) => {
+          if (v === null || v === undefined) return '';
+          const s = String(v);
+          return /[",\n]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s;
+        };
+
+        const lines = [headers.join(',')];
+        for (const row of lastResult.rows) {
+          lines.push(headers.map(h => escCsv(row[h])).join(','));
+        }
+
+        const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'images-report-deduped-actual-ppi.csv';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+    </script>
+  </body>
+</html>
