@@ -105,11 +105,13 @@ function extractImgTags_(html, baseUrl) {
 
   for (var i = 0; i < tags.length; i++) {
     var tag = tags[i];
-    var src = getAttribute_(tag, 'src');
-    if (!src) continue;
+    var candidateUrl = chooseBestImageUrlFromTag_(tag);
+    if (!candidateUrl) continue;
 
-    var resolved = resolveUrl_(baseUrl, src.trim());
+    var resolved = resolveUrl_(baseUrl, candidateUrl.trim());
     if (!resolved) continue;
+
+    resolved = decodeImageProxyUrl_(resolved, baseUrl);
 
     out.push({
       url: resolved,
@@ -119,6 +121,100 @@ function extractImgTags_(html, baseUrl) {
   }
 
   return out;
+}
+
+function chooseBestImageUrlFromTag_(tag) {
+  // Prioritize non-cached/original URL attributes first.
+  var preferredAttrs = [
+    'data-nitro-lazy-src',
+    'data-nitro-src',
+    'data-src',
+    'data-lazy-src',
+    'data-original',
+    'data-orig-file',
+    'data-image',
+    'src'
+  ];
+
+  for (var i = 0; i < preferredAttrs.length; i++) {
+    var value = getAttribute_(tag, preferredAttrs[i]);
+    if (value && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+
+  // Fallback to first URL in srcset/data-srcset when src is missing.
+  var srcset = getAttribute_(tag, 'data-srcset') || getAttribute_(tag, 'srcset');
+  if (srcset) {
+    var first = parseFirstUrlFromSrcset_(srcset);
+    if (first) return first;
+  }
+
+  return '';
+}
+
+function parseFirstUrlFromSrcset_(srcset) {
+  var parts = String(srcset).split(',');
+  if (!parts.length) return '';
+  var first = String(parts[0]).trim();
+  if (!first) return '';
+  return first.split(/\s+/)[0] || '';
+}
+
+function decodeImageProxyUrl_(resolvedUrl, baseUrl) {
+  if (!resolvedUrl) return resolvedUrl;
+
+  // Common proxy/cached URL wrappers include the original URL in a query param.
+  var wrapped = readQueryParam_(resolvedUrl, 'url')
+    || readQueryParam_(resolvedUrl, 'src')
+    || readQueryParam_(resolvedUrl, 'image')
+    || readQueryParam_(resolvedUrl, 'img');
+
+  if (wrapped) {
+    var decoded = decodeURIComponentSafe_(wrapped);
+    var nestedResolved = resolveUrl_(baseUrl, decoded);
+    if (nestedResolved) return nestedResolved;
+  }
+
+  return normalizeNitroCachePath_(resolvedUrl);
+}
+
+function readQueryParam_(url, key) {
+  var m = url.match(new RegExp('[?&]' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^&#]*)', 'i'));
+  return m ? m[1] : '';
+}
+
+function decodeURIComponentSafe_(value) {
+  try {
+    return decodeURIComponent(String(value).replace(/\+/g, '%20'));
+  } catch (err) {
+    return value;
+  }
+}
+
+function normalizeNitroCachePath_(url) {
+  // NitroPack cache URLs often keep the same origin and file path but prepend cache segments.
+  // Example patterns handled:
+  // - /wp-content/cache/nitro/.../wp-content/uploads/.../image.jpg
+  // - /wp-content/cache/nitro/.../image.jpg.webp (webp cache variant)
+  var marker = '/wp-content/cache/nitro/';
+  var idx = url.toLowerCase().indexOf(marker);
+  if (idx === -1) return url;
+
+  var originMatch = url.match(/^(https?:\/\/[^\/]+)/i);
+  var origin = originMatch ? originMatch[1] : '';
+  var path = url.substring(idx + marker.length);
+
+  // Keep only the trailing original-like path segment when nested wp-content path is present.
+  var nestedIdx = path.toLowerCase().indexOf('/wp-content/');
+  if (nestedIdx !== -1) {
+    return origin + path.substring(nestedIdx);
+  }
+
+  // Otherwise just strip the cache prefix and remove webp cache suffix if present.
+  path = '/' + path.replace(/^\/+/, '');
+  path = path.replace(/\.webp($|[?#])/i, '$1');
+  return origin + path;
 }
 
 function getAttribute_(tag, attributeName) {
