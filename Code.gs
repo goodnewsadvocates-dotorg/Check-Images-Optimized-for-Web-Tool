@@ -176,6 +176,9 @@ function decodeImageProxyUrl_(resolvedUrl, baseUrl) {
     if (nestedResolved) return nestedResolved;
   }
 
+  var nitroCdnDecoded = decodeNitroCdnProxyUrl_(resolvedUrl);
+  if (nitroCdnDecoded) return nitroCdnDecoded;
+
   return normalizeNitroCachePath_(resolvedUrl);
 }
 
@@ -215,6 +218,20 @@ function normalizeNitroCachePath_(url) {
   path = '/' + path.replace(/^\/+/, '');
   path = path.replace(/\.webp($|[?#])/i, '$1');
   return origin + path;
+}
+
+function decodeNitroCdnProxyUrl_(url) {
+  // Nitro CDN optimized URLs frequently look like:
+  // https://cdn-xxxxx.nitrocdn.com/<token>/assets/images/optimized/rev-<hash>/<original-host>/<original-path>
+  // We recover the original by rebuilding https://<original-host>/<original-path>.
+  var match = String(url).match(/\/assets\/images\/optimized\/rev-[^\/]+\/([^\/]+)\/(.+)$/i);
+  if (!match) return '';
+
+  var host = match[1] || '';
+  var path = match[2] || '';
+  if (!host || !path) return '';
+
+  return 'https://' + host + '/' + path.replace(/^\/+/, '');
 }
 
 function getAttribute_(tag, attributeName) {
